@@ -1,5 +1,5 @@
 # Statistical-Analysis-of-Movie-Box-Office
-Exploratory data analysis, regression, PCA and clustering using R.
+Statistical analysis of worldwide movie box office data using R, including regression modelling, PCA and clustering.
 # Statistical Movie Box Office Analysis
 
 Statistical analysis of worldwide movie box office data using **R**, completed as part of an undergraduate statistics project.
