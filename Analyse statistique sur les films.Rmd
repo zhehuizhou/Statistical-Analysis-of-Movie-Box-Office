@@ -1,0 +1,1652 @@
+---
+title: "Analyse sur les meilleurs films"
+author: "Zhehui ZHOU"
+date: "2026-04-16"
+output: 
+  pdf_document:
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+getOption("repos")
+```
+
+Importation des packages nécessaires à l'analyse
+
+```{r}
+library(pacman)
+pacman::p_load(
+  dplyr,
+  ggplot2,
+  tidyverse,
+  stringr,
+  purrr,
+  tibble,
+  knitr,
+  readr,
+  janitor,
+  vtable,
+  moments,
+  broom,
+  factoextra,
+  ggdendro,
+  gridExtra,
+  BioStatR,
+  questionr,
+  scales
+)
+```
+
+# Section 1. Introduction
+
+Cet ensemble de données ***TopMovies*** de kaggle propose une compilation exhaustive d'indicateurs financiers et de performance pour plus de 6 500 films, extraits du site The Numbers. Il comprend des informations clés telles que le budget de production, les recettes au box-office (domestiques et internationales) les notes attribuées, et bien plus encore.
+
+```{r}
+TopMovies <- read_csv("Top Movies.csv",
+                      locale = locale(encoding = "UTF-8"),
+                      show_col_types = FALSE)
+TopMovies <- TopMovies %>% clean_names()
+```
+
+# Section 2. Préparation des données
+
+La variable "Theater counts" contenait plusieurs informations combinées dans une seule colonne, ce qui rendait son exploitation difficile pour l’analyse statistique.
+
+Afin de respecter "tidy data", cette variable a été décomposée en trois indicateurs quantitatifs : le nombre de salles à l’ouverture, le ratio d’ouverture (opening/max) et la durée moyenne d’exploitation en semaines.
+
+Cette transformation permet de simplifier l’analyse, de faciliter l’utilisation des méthodes statistiques et d’améliorer l’interprétation des résultats.
+
+```{r}
+# Convertir les variables qualitatives en facteurs
+TopMovies <- TopMovies %>%
+  mutate(across(where(is.character), as.factor))
+
+# Extraire les informations de la variable "theater_counts" et créer les nouvelles variables
+TopMovies <- TopMovies %>%
+  mutate(
+    opening_theaters = as.numeric(str_extract(theater_counts, "^[0-9,]+") %>% 
+                                    str_replace_all(",", "")),
+    
+    max_theaters = as.numeric(str_extract(theater_counts, "/[0-9,]+") %>% 
+                                str_remove("/") %>% str_replace_all(",", "")),
+    
+    avg_run_weeks = as.numeric(str_extract(theater_counts, "[0-9.]+(?= weeks)")),
+    
+    theater_ratio = opening_theaters / max_theaters
+  ) %>%
+  select(-max_theaters)# Suppression de la variable intermédiaire max_theaters
+```
+
+On va faire un peu de nettoyage pour la variable "creative_type" pour une meilleure lisibilité du tableau et du graphique
+
+```{r}
+TopMovies <- TopMovies %>%
+  mutate(creative_type = case_when(
+    creative_type == "Contemporary Fiction" ~ "Contemp",
+    creative_type == "Dramatization" ~ "Drama",
+    creative_type == "Historical Fiction" ~ "Hist",
+    creative_type == "Kids Fiction" ~ "Kids",
+    creative_type == "Multiple Creative Types" ~ "Multi",
+    creative_type == "Science Fiction" ~ "Sci-Fi",
+    creative_type == "Super Hero" ~ "Hero",
+    TRUE ~ creative_type
+  ))
+
+```
+
+Les colonnes ont été réorganisées afin de regrouper les variables qualitatives en début de tableau, suivies des variables quantitatives, dans le but d’améliorer la lisibilité du jeu de données et de faciliter les analyses statistiques.
+
+```{r}
+TopMovies <- TopMovies %>% 
+  relocate(franchise, 
+           genre, 
+           creative_type, 
+           production_financing_companies,
+           production_countries,
+           languages,
+           theater_counts,
+           .after = release_date) %>% 
+  relocate(domestic_share_percentage,
+           .after = worldwide_box_office_usd) %>% 
+  relocate(opening_theaters,
+           theater_ratio,
+           avg_run_weeks,.after = theater_counts)
+```
+
+# Section 3. Description du jeu de données
+
+À L'aide de fonction dim() et glimpse() on a resumé une table des variables.
+
+Le jeu de données `TopMovies` contient **`r nrow(TopMovies)` observations** (films) et **`r ncol(TopMovies)` variables** :
+
+| Variable                              | Type                    | Description |
+|---------------------------------------|-------------------------|-------------|
+| `franchise`                           | Qualitative nominale    | Franchise à laquelle appartient le film |
+| `genre`                               | Qualitative nominale    | Genre principal du film |
+| `creative_type`                       | Qualitative nominale    | Type créatif ou type de production du film |
+| `production_financing_companies`      | Qualitative nominale    | Sociétés ayant financé la production du film |
+| `production_countries`                | Qualitative nominale    | Pays de production du film |
+| `languages`                           | Qualitative nominale    | Langue(s) utilisée(s) dans le film |
+| `opening_theaters`                    | Quantitative discrète   | Nombre de salles lors de la sortie initiale |
+| `theater_ratio`                       | Quantitative continue   | Ratio entre le nombre de salles et le maximum |
+| `avg_run_weeks`                       | Quantitative continue   | Durée moyenne d’exploitation en semaines |
+| `production_budget_usd`               | Quantitative continue   | Budget de production du film (USD) |
+| `domestic_box_office_usd`             | Quantitative continue   | Recettes domestiques (USD) |
+| `international_box_office_usd`        | Quantitative continue   | Recettes internationales (USD) |
+| `worldwide_box_office_usd`            | Quantitative continue   | Recettes totales (USD) |
+| `domestic_share_percentage`           | Quantitative continue   | Part des recettes domestiques (%) |
+| `opening_weekend_usd`                 | Quantitative continue   | Recettes du premier week-end (USD) |
+| `legs`                                | Quantitative continue   | Indicateur du succès |
+| `infl_adj_dom_bo_usd`                 | Quantitative continue   | Box-office domestique ajusté à l’inflation (USD) |
+| `running_time_minutes`                | Quantitative discrète   | Durée du film en minutes |
+
+- Les variables `id` et `movie_name` sont des variables qualitatives utilisées uniquement comme identifiants.
+- La variable `release_date` correspond à la date de sortie du film.
+- Les variables qualitatives, telles que `franchise`, `genre`, `creative_type`, `production_financing_companies`, `production_countries` et `languages`, permettent de caractériser les films selon leur contexte de production et types.
+- Les variables issues de la transformation de `theater_counts`, à savoir `opening_theaters`, `theater_ratio` et `avg_run_weeks`, fournissent des informations sur les conditions d’exploitation en salles.
+- La variable `legs` est un indicateur du succès d’un film après son premier week-end d’exploitation (box-office national / meilleur week-end)."A movie has legs" en anglais veut dire qu'un film est capable de maintenir de bonnes performances au box-office après son week-end d’ouverture.
+- Enfin, les variables quantitatives financières constituent le cœur de l’analyse économique du projet.
+
+# Section 4. Traitement des valeurs manquantes
+
+On va commencer par faire un tableau récapitulatif du nombre et de la proportion de valeurs manquantes pour chaque variable, afin d’identifier les variables les plus affectées par les données manquantes et de prendre des décisions éclairées sur leur traitement ultérieur.
+
+```{r}
+# Tableau récapitulatif : nombre et proportion de NA par variable
+resume_na <- data.frame(
+  Variable = names(TopMovies),
+  Nb_NA = colSums(is.na(TopMovies)),
+  Pourcentage_NA = round(colSums(is.na(TopMovies)) / nrow(TopMovies) * 100, 2)
+)
+
+# Tri du tableau par nombre de NA et filtrage des variables avec plus de 0% de NA
+resume_na <- resume_na %>%
+  arrange(desc(Nb_NA))%>%
+  filter(Pourcentage_NA > 0)
+
+kable(resume_na, 
+      caption = "Nombre et proportion de valeurs manquantes par variable")
+
+```
+
+**Les valeurs manquantes pour cette variable sont si nombreuses qu'il est désormais inutile de procéder à une analyse. Les variables relatives aux ventes des DVD et Blu-ray présentent un taux de valeurs manquantes supérieur à 60 %.Compte tenu de cette proportion élevée de données manquantes, ainsi que de leur caractère estimatif et de leur lien indirect avec la performance en salles, ces variables ne seront pas retenues comme variables principales dans l’analyse. on va les exclure.Également pour la variable franchise avec un taux de valeurs manquante de 78%**
+
+```{r}
+TopMovies <- TopMovies %>% 
+  select(-"est_domestic_dvd_sales_usd",
+         -"est_domestic_blu_ray_sales_usd", 
+         -"total_est_domestic_video_sales_usd",
+         -"franchise")
+```
+
+Bien que ces variables contiennent encore de nombreuses valeurs manquantes, l'échantillon reste suffisamment important une fois ces valeurs manquantes supprimées.Cependant, supprimer directement toutes les lignes (observations) contenant la valeur NA entraînerait une perte d'informations trop importante.On va donc pour l'instant les conserver et les traiter lors des analyses spécifiques ultérieures.
+
+# Section 5. Les objectifs de l’analyse
+
+Au-delà d’une simple exploration statistique, ce projet cherche à comprendre quels facteurs permettent d’expliquer le succès commercial d’un film et dans quelle mesure certaines caractéristiques peuvent aider à anticiper sa rentabilité économique.
+
+Dans l’industrie cinématographique, les décisions de production et d’investissement reposent souvent sur des anticipations financières : budget alloué, stratégie de diffusion, exposition en salles ou encore popularité attendue auprès du public. L’objectif général de cette étude est donc d’identifier les éléments les plus associés aux performances au box-office afin d’adopter une logique proche de celle d’un investisseur, d’un studio de production ou d’un distributeur cherchant à limiter les risques financiers et à maximiser les chances de succès commercial.
+
+L’analyse ne vise pas uniquement à décrire les films les plus rentables, mais également à comprendre les mécanismes économiques qui structurent le marché cinématographique : quels types de films dominent le marché, quels indicateurs permettent de prédire les recettes futures, ou encore quels profils de productions semblent présenter les meilleures probabilités de réussite.
+
+L’ensemble des analyses réalisées dans ce projet s’inscrit ainsi dans une démarche progressive : partir d’une exploration globale des données, identifier les tendances majeures, étudier les relations entre variables, puis construire une vision synthétique des différents profils économiques de films présents dans l’industrie.
+
+Plus précisément, plusieurs axes d’analyse seront développés :
+
+## 0) Exploration et requêtes analytiques
+
+Avant de procéder aux analyses statistiques, une étape de manipulation des données va être réaliser afin de mieux comprendre ce jeu de données.
+
+Plusieurs traitements vont notamment être effectués :
+
+- Quels types de films obtiennent les meilleures recettes au box-office mondial selon leur genre, leur type de production et leur langue ou pays de production ?
+- Quelle entreprise a réalisé le plus gros chiffre de Box office ?Quelle est celle qui a profité les plus élevés ?
+- Quelles sont les entreprises dans lesquelles ils sont les plus judicieuses d'investir (le meilleur retour sur investissement/ROI) ?
+- Quelles sont les films les plus attendus par le public et les marchés financiers ?
+- Quels sont les films qui, au départ, n'ont pas suscité beaucoup d'intérêt mais qui ont ensuite reçu un très bon accueil du public ?
+
+Ces manipulations permettent de mettre en évidence des tendances générales, telles que la concentration des recettes sur certains films ou l’évolution du marché
+cinématographique au cours du temps.
+
+## 1) Analyse descriptive
+
+Dans un premier temps, une analyse descriptive sera menée afin de mieux comprendre la structure du jeu de données.
+
+- Pour les variables quantitatives (par exemple : `production_budget_usd`, `worldwide_box_office_usd`, `opening_weekend_usd`), des indicateurs statistiques tels que la moyenne, la médiane et la variance seront calculés.  
+  Des visualisations (histogrammes, boîtes à moustaches) permettront d’identifier la distribution des valeurs, la présence d’asymétries ou de valeurs extrêmes.
+
+- Pour les variables qualitatives (par exemple : `languages`, `creative_type`,`production_countries`), les effectifs et les fréquences seront étudiés à l’aide de table statistique et diagrammes en barres, afin d’identifier les catégories les plus représentées.
+
+Cette étape permettra de mieux comprendre la structure des données et de formuler des hypothèses pour les analyses suivantes.
+
+
+## 2) Analyse des relations entre variables quantitatives
+
+L’objectif est déterminer si certaines variables (comme le budget ou le week-end d’ouverture) constituent de bons prédicteurs du succès finacier, notamment :
+
+- le lien entre le budget de production et les recettes mondiales (`production_budget_usd` vs `worldwide_box_office_usd`)  
+- le rôle du revenu du premier week-end/Le niveau d'attente du public   (`opening_weekend_usd`) dans la performance globale.
+- le rôle du niveau d'exposition (`theater_ratio * avg_run_weeks'`) 
+
+Ces relations seront étudiées à l’aide de nuages de points et de modèles de régression linéaire.  
+L’analyse des résidus permettra de vérifier la validité des modèles et d’évaluer la qualité de l’ajustement.
+
+
+## 3) Analyse des relations entre variables qualitatives
+
+On cherchera à analyser les dépendances entre variables qualitatives et identifier des associations entre catégories , par exemple :
+
+- Quels sont les genres/creative_type de films privilégiés dans la production par les différents pays et régions ?
+
+Ces relations seront étudiées à l’aide de tableaux de contingence, de distributions conditionnelles et de tests du chi-deux.
+
+
+## 4) Analyse multivariée
+
+Enfin, l’objectif est d’étudier l’influence des variables qualitatives sur les variables quantitatives, par exemple :
+
+- l’effet du `genre` sur les recettes mondiales.
+- L'influence de l'entreprise de production sur les résultats au box-office .
+Ces relations seront analysées à l’aide de boxplots et de tests d'influence pour déterminer si certaines catégories sont associées à des niveaux de performance significativement différents.
+
+
+Dans l’ensemble, ces analyses permettront d’identifier les principaux facteurs explicatifs du succès commercial des films et de mieux comprendre la structure économique du marché cinématographique.
+
+
+## 5) Analyse des composantes principales
+
+Une Analyse en Composantes Principales (ACP) sera réalisée sur un ensemble de variables quantitatives liées aux performances économiques des films, telles que le budget de production, les recettes du week-end d’ouverture, les recettes mondiales, ainsi que la durée moyenne d’exploitation en salle.
+
+L’objectif de cette analyse est de réduire la dimension des données tout en conservant un maximum d’information, afin d’identifier les principales structures et corrélations entre les variables.
+
+Le cercle des corrélations sera utilisé afin d’interpréter les relations entre les variables quantitatives et leur contribution aux différents axes principaux. Cette représentation permettra notamment d’identifier les variables fortement corrélées, opposées ou indépendantes.
+
+Le graphique des individus (projection ACP) permettra quant à lui de visualiser la répartition des films selon leurs caractéristiques économiques et commerciales, et d’observer d’éventuels regroupements ou profils similaires entre les productions cinématographiques.
+
+
+## 6) Analyse de classification avec Kmeans et classification hiérarchique
+
+Une classification par l’algorithme des K-means sera réalisée sur les variables quantitatives centrées et réduites afin d’identifier différents profils de films selon leurs caractéristiques économiques et commerciales.Le nombre optimal de clusters sera déterminé à l’aide de la méthode du coude (« elbow method »). Les groupes obtenus seront ensuite projetés sur le plan de l’ACP (PC1, PC2) afin de visualiser plus facilement la structure des clusters et les différences entre les profils de films.
+
+En complément, une classification hiérarchique sera réalisée sur une groupe d'observation sélectionnée aléatoirement pour faciliter la visualisation afin de visualiser les proximités entre les films sous forme de dendrogramme.
+
+
+# Section 6. Les analyses
+
+## 0) Exploration et requêtes analytiques
+
+Cette section constitue une étape d'exploration analytique préliminaire, distincte des analyses statistiques présentées dans les sections suivantes. Dans une logique proche de celle d’un investisseur ou d’un studio, il est essentiel de commencer par observer quels types de films dominent historiquement le box-office, quelles entreprises génèrent les profits les plus élevés et quels modèles économiques semblent les plus rentables.
+
+Cette exploration permet également de mettre en évidence certaines stratégies de succès récurrentes dans l’industrie : domination de certains genres, rôle des grandes sociétés de production ou encore capacité de certains films à devenir des succès inattendus malgré des débuts modestes.
+
+###  Question1 ：Les 10 meilleurs films du monde(en regardent les recettes mondiales) , les 10 meilleures films de tous les temps aux États-Unis et les 10 films les plus déficitaires?
+
+```{r}
+TopMovies %>% 
+  select(movie_name,worldwide_box_office_usd) %>% 
+  arrange(desc(worldwide_box_office_usd)) %>% 
+  slice(1:10) %>% 
+  kable(
+    caption = "Top 10 des films les plus performants au box-office mondial"
+  )
+```
+
+En utilisant la variable `infl_adj_dom_bo_usd`, nous pouvons comparer de manière plus équitable les performances financières des films à travers du temps, en neutralisant l’effet de l’inflation sur les recettes.
+
+```{r}
+TopMovies %>% 
+  select(movie_name,infl_adj_dom_bo_usd) %>% 
+  arrange(desc(infl_adj_dom_bo_usd)) %>% 
+  slice(1:10) %>% 
+  kable(
+    caption = "Top 10 des films de tous les temps aux États-Unis"
+  )
+```
+
+
+```{r}
+TopMovies %>% 
+  filter(!is.na(production_budget_usd)) %>%
+  #les films les plus déficitaires sont ceux qui ont le profit le plus négatif, 
+  #donc on arrange par ordre croissant
+  mutate(
+    profit = worldwide_box_office_usd - production_budget_usd,
+    ) %>%
+  select(movie_name,profit) %>% 
+  arrange(profit) %>% 
+  slice(1:10) %>% 
+  kable(
+    caption = "Top 10 des films les plus déficitaires"
+  )
+
+```
+
+###  Question 2 ：Quel 'genre' de film ayant généré les recettes les plus élevées au box-office mondial et même pour ('creative_type','languages','production_countries')
+
+On va créer une fonction pour analyser les recettes mondiales en fonction de différentes variables qualitative. cette fonction va afficher les recettes total et moyenne pour les différentes variables qualitative pour mieux comprendre les performance.Afin de rendre le code plus lisible. Cette fonction va afficher seulement les 10 premières catégories.
+
+```{r}
+analyse_revenus <- function(data, var){
+  data %>%
+    filter(!is.na({{var}})) %>%
+    group_by({{var}}) %>%
+    summarise(
+      total = sum(worldwide_box_office_usd, na.rm = TRUE),
+      moyenne = mean(worldwide_box_office_usd, na.rm = TRUE)
+    ) %>%
+    arrange(desc(total)) %>%
+    slice(1:10)
+}
+```
+
+
+```{r}
+#les recettes des différents genre de films
+analyse_revenus(TopMovies, genre) %>% 
+  kable(
+    caption = "Top 10 des genres de films "
+  )
+```
+
+
+```{r}
+#les recettes des différents types de production du films
+analyse_revenus(TopMovies, creative_type) %>% 
+  kable(
+    caption = "Top 10 des type de production de films "
+  )
+```
+
+Les variables Languages et Production.Countries contiennent des informations multiples pour une même observation.Afin de permettre une analyse pertinente, ces variables ont été transformées en séparant les différentes modalités.
+
+separate_rows permet de s'assurer que chaque ligne de la base de données (correspondant à un film) ne contient qu'une seule valeur dans la colonne `language`. Cela rend la table tidy, mais si un même film est disponible en plusieurs langues, celles-ci seront comptées plusieurs fois.
+
+```{r}
+TopMovies_lang <- TopMovies %>%
+  filter(!is.na(languages)) %>% 
+  separate_rows(languages, sep = ",") %>% 
+  mutate(
+    languages = case_when(
+      languages == "Na'vi" ~ "English",
+      #Il exist une langue 'Na'vi' qui est langue des habitentes sur Pandora, 
+      #on la compte comme de l’anglais.
+      TRUE ~ languages
+    )
+  )  
+#les recettes des différentes langues du films
+analyse_revenus(TopMovies_lang, languages) %>% 
+  kable(
+    caption = "Top 10 des langues de films "
+  )
+```
+
+De même, pour « production_countries », si un film est coproduit par plusieurs pays, ceux-ci sont comptabilisés plusieurs fois.
+
+```{r}
+TopMovies_pays <- TopMovies %>%
+  separate_rows(production_countries, sep = ",")
+
+#les recettes des différentes pays du films
+analyse_revenus(TopMovies_pays, production_countries) %>% 
+  kable(
+    caption = "Top 10 des pays de production de films "
+  )
+
+```
+
+###  Question 3 ：Quelle entreprise a réalisé le plus gros chiffre de Box office ? Quelle est celle qui a les profits les plus élevés ? (profit== worldwide_boxoffice - production_budget_usd)
+
+On rencontre le même problème, la variable 'production_financing_companies' contient des informations multiples pour une même observation.Afin de permettre une analyse pertinente, cette variable a été transformée.
+
+Particulièrement, en ce qui concerne la confusion sur le nom de la société de production lors de la saisie, Fox 2000 Pictures, Twentieth Century Fox et 20th Century Studios désignent tous la même entité, à savoir 20th Century Fox.
+
+```{r}
+TopMovies_companies <- TopMovies %>%
+  filter(!is.na(production_financing_companies)) %>%
+  separate_rows(production_financing_companies, sep = ",") %>% 
+  mutate(
+    production_financing_companies = case_when(
+      production_financing_companies == "Fox 2000 Pictures" ~ 
+        "20th Century Fox",
+      production_financing_companies == "Twentieth Century Fox" ~ 
+        "20th Century Fox",
+      production_financing_companies == "20th Century Studios" ~ 
+        "20th Century Fox",
+      TRUE ~ production_financing_companies
+    )
+  )
+```
+
+
+```{r}
+#Box office des entreprise
+TopMovies_companies %>% 
+  filter(!is.na(production_financing_companies)) %>% 
+  group_by(production_financing_companies) %>% 
+  summarise(
+    total=sum(worldwide_box_office_usd, na.rm = TRUE)
+    ) %>% 
+  arrange(desc(total))%>%
+  slice(1:10) %>%
+  kable(
+    caption = "Top 10 des sociétés de production les plus performantes au box-office"
+  )
+```
+
+
+```{r}
+#Profits des entreprise
+TopMovies_companies %>% 
+  filter(!is.na(production_financing_companies) & !is.na(production_budget_usd)) %>% 
+  group_by(production_financing_companies) %>% 
+  summarise(
+    profit= sum(worldwide_box_office_usd - production_budget_usd, na.rm = TRUE)
+    ) %>% 
+  arrange(desc(profit))%>%
+  slice(1:10) %>%
+  kable(
+    caption = "Top 10 des sociétés de production les plus rentables"
+  )
+```
+
+###  Question 4 : Les dix films et les dix entreprises ayant le meilleur retour sur investissement
+
+ROI=((Gain de l’investissement-coût de l’investissement)/coût de l’investissement) x 100.
+
+```{r}
+#ROI des films
+TopMovies %>% 
+  filter(!is.na(production_budget_usd)) %>% 
+  mutate(
+    profit = worldwide_box_office_usd - production_budget_usd,
+    budget = production_budget_usd,
+    ROI=profit/budget*100
+    ) %>%
+  select(movie_name,ROI) %>% 
+  arrange(desc(ROI)) %>% 
+  slice(1:10) %>% 
+  kable(
+    caption = "Top 10 des films avec le meilleur retour sur investissement (ROI)"
+  )
+```
+
+
+```{r}
+#ROI des entreprises
+TopMovies_companies %>% 
+  filter(!is.na(production_financing_companies) & 
+           !is.na(production_budget_usd)) %>% 
+  group_by(production_financing_companies) %>% 
+  summarise(
+    profit = sum(worldwide_box_office_usd - production_budget_usd, na.rm = TRUE),
+    budget = sum(production_budget_usd, na.rm = TRUE),
+    ROI = (profit / budget) * 100,
+    ) %>% 
+  arrange(desc(ROI))%>%
+  slice(1:10) %>% 
+  kable(
+    caption = "Top 10 des sociétés de production avec le meilleur retour sur investissement (ROI)"
+  )
+```
+
+###  Question 5 ：Les dix films les plus attendus par le public et les marchés financiers
+
+Les attentes du public se reflètent dans les recettes de la première semaine (opening_weekend_usd)
+
+```{r}
+TopMovies %>% 
+  select(movie_name,opening_weekend_usd) %>% 
+  arrange(desc(opening_weekend_usd)) %>% 
+  slice(1:10) %>% 
+  kable(
+    caption = "Top 10 des films les plus attendus par le public"
+  )
+```
+
+On utilise la formule « theater_ratio * production_budget_usd » pour évaluer les attentes du marché financier
+
+```{r}
+TopMovies %>% 
+  filter(!is.na(theater_ratio) & !is.na(production_budget_usd) ) %>% 
+  mutate(
+    attentes_financier=theater_ratio*production_budget_usd
+    ) %>%
+  select(movie_name,attentes_financier) %>% 
+  arrange(desc(attentes_financier)) %>% 
+  slice(1:10) %>% 
+  kable(
+    caption = "Top 10 des films les plus attendus par les marchés financiers"
+  )
+```
+
+###  Question 6 ：Quels sont les films à succès retardé (en englais :sleeper hit movies) ?
+
+"Legs" est un indicateur du succès d'un film après son premier week-end d'exploitation (box-office national / meilleur week-end) et on sait que sur le marché du cinéma, seules les films qui ont reçu un bon accueil du public après leur sortie restent généralement à l'affiche plus longtemps.On utilise donc le terme  legs*avg_run_weeks/moyenne_weeks  pour décrire les films à succès inattendus 
+
+```{r}
+moyenne_weeks <- mean(TopMovies$avg_run_weeks, na.rm = TRUE)
+TopMovies %>% 
+  filter(!is.na(legs) & !is.na(avg_run_weeks) ) %>% 
+  mutate(
+    sleeper_hit_index=legs * avg_run_weeks/moyenne_weeks
+    ) %>%
+  select(movie_name,sleeper_hit_index) %>% 
+  arrange(desc(sleeper_hit_index)) %>% 
+  slice(1:10) %>% 
+  kable(
+    caption = "Top 10 des films à succès inattendus (sleeper hit movies)"
+  )
+
+```
+
+# 1) Analyse descriptive
+
+## Variables quantitatives
+
+Avant de construire des modèles explicatifs ou prédictifs, il est nécessaire de comprendre la structure générale des données étudiées. Cette étape descriptive permet d’identifier la distribution des variables économiques importantes, de détecter la présence de valeurs extrêmes et de mieux comprendre les caractéristiques dominantes du marché cinématographique.
+
+### Statistiques descriptives et visualisation de la distribution des variables quantitatives
+
+```{r}
+#On utilise st pour avoir un aperçu de ces données
+TopMovies %>%
+  select(production_budget_usd,worldwide_box_office_usd,opening_weekend_usd) %>%
+  st(out = "kable", title = "Statistiques descriptives") %>%
+  kable_styling(
+    latex_options = "hold_position"
+  )
+```
+
+On s'intéresse particulièrement sur le coefficient d'asymétrique et d'aplatissement qui décrit la distribution (Coefficient d'asymétrie (Skewness) ,Coefficient d'aplatissement (Kurtosis))
+
+```{r}
+#On crée une fonction resume_stats pour calculer les statistiques descriptives 
+resume_stats <- function(x, nom = "variable") {
+  tibble(
+    variable = nom,
+    median = median(x, na.rm = TRUE),
+    Ecart_type = sd(x, na.rm = TRUE),
+    Skewness   = round(skewness(x,na.rm = TRUE), 3),
+    Kurtosis   = round(kurtosis(x,na.rm = TRUE) - 3, 3)
+  )
+}
+#Ensuite, on utilise bind_rows pour combiner les résultats de ces trois variables 
+#dans un seul tableau, qui est ensuite affiché à l'aide de kable.
+bind_rows(
+  resume_stats(TopMovies$production_budget_usd, 
+               "Budget de production du film (USD)"),
+  resume_stats(TopMovies$worldwide_box_office_usd,
+               "box-office mondial (USD)"),
+  resume_stats(TopMovies$opening_weekend_usd, 
+               "opening_weekend_usd (USD)"),
+) %>%
+  kable(
+    caption = "Résumé statistique"
+    )
+```
+
+On constate que les trois variables quantitatives présentent une forte asymétrie positive  et un aplatissement exagéré, ce qui indique que la distribution des données est très concentrée autour de la médiane, avec une longue queue à droite. Cela suggère la présence de valeurs extrêmes qui peuvent influencer les analyses statistiques et nécessitent une attention particulière lors de l'interprétation des résultats.
+
+### Visualisation de la distribution des variables quantitatives
+
+Maintenant on cherche à visualiser la distribution de ces trois variables quantitatives à l'aide de boxplots,en utilisant une fonction make_boxplot pour plus de clarté visuelle.
+
+```{r}
+Make_boxplot <- function(data, y_var, title) {
+  data <- data %>%
+    filter(!is.na({{y_var}}))
+  ggplot(data = data, aes(x = "", y = {{y_var}})) +
+    geom_boxplot() +
+#La moyenne est indiquée par un point rouge sur les boxplots
+    stat_summary(fun = mean, 
+                 geom = "point", 
+                 shape = 18, 
+                 size = 3, 
+                 color = "red") +
+#Utilisation de scale_y_log10 nous permettons d’améliorer la lisibilité des graphiques.
+    scale_y_log10(labels = scales::comma) +
+    labs(
+      title = title,
+      y = title
+    ) +
+    theme_grey()
+}
+```
+
+
+```{r}
+#Boxplot du Budget de production du film (USD)
+Make_boxplot(TopMovies, production_budget_usd, 
+             "Budget de production du film (USD)")
+```
+
+
+```{r}
+#Boxplot du worldwide_box_office_usd
+Make_boxplot(TopMovies, worldwide_box_office_usd, 
+             "box-office mondial (USD)")
+```
+
+
+```{r}
+#Boxplot du opening_weekend_usd
+Make_boxplot(TopMovies, opening_weekend_usd, 
+             "opening weekend box-office (USD)")
+```
+**Interprétation** :Les boxplots confirment visuellement les constats précédents : les variables financières sont dominées par quelques films aux performances exceptionnellement élevées.
+
+### Comparaison des distribution des recettes mondiales avant et après correction de l'inflation
+
+Boxplot dans une seule graphe pour worldwide_box_office_usd et inf_adjdom_bo_usd dans une seule graphe pour comparer les deux variables et voir l'effet de l'inflation sur les recettes mondiales. on utilise scale_y_log10(labels = scales::comma) pour une meilleure visualisation des données.
+
+```{r}
+TopMovies_long <- TopMovies %>%
+  select(domestic_box_office_usd, infl_adj_dom_bo_usd) %>%
+#Transformation de la dataset pour la visualisation
+  pivot_longer(
+    cols = everything(),
+    names_to = "type",
+    values_to = "value"
+  ) %>%
+  mutate(
+    type = recode(type,
+      "domestic_box_office_usd" = "Avant correction de l'inflation",
+      "infl_adj_dom_bo_usd" = "Après correction de l'inflation"
+    )
+  ) %>%
+  filter(!is.na(value))
+```
+
+
+```{r}
+# Comparaison des boxplots pour les recettes domestiques avant et après correction de l'inflation
+ggplot(data = TopMovies_long, aes(x = type, y = value, fill = type)) +
+  geom_boxplot() +
+  stat_summary(fun = mean, geom = "point", shape = 18, size = 3, color = "green") +
+  scale_y_log10(labels = scales::comma) +
+  scale_fill_manual(values = c(
+    "Avant correction de l'inflation" = "#E63946",
+    "Après correction de l'inflation" = "#457B9D"
+  )) +
+  labs(title = "Boxplot du box-office domestique et du box-office domestique ajusté",
+    x = "Type de recette",
+    y = "Valeur (USD)") +
+  theme_grey()
+  
+```
+
+**La correction de l’inflation modifie légèrement la distribution des recettes domestiques, mais les deux variables conservent une forte asymétrie ainsi que la présence de nombreux films aux performances exceptionnellement élevées.**
+
+### Histogramme et courbe de densité des variables quantitatives
+
+On définit toujours une fonction Make_density qui va tracer l'histogramme et la courbe de densité pour une variable quantitative donnée, en affichant la moyenne et la médiane à l'aide de lignes verticales. on utilise également une échelle logarithmique en x afin de mieux visualiser les graphes.
+
+```{r}
+Make_density <- function(data, x_var, title, x_title) {
+  data <- data %>%
+    filter(!is.na({{x_var}}))
+  ggplot(data = data, aes(x = {{x_var}})) +
+    #Histogramme
+    geom_histogram(aes(y = after_stat(density)), 
+                   bins = 30, fill = "#E63946",
+                   color = "black") +
+    #Courbe de densité
+    geom_density(bw ='nrd0', 
+                 color = "#457B9D",
+                 linewidth  = 1) +
+    #Ligne vert indique la moyenne
+    geom_vline(aes(xintercept = mean({{x_var}}, na.rm = TRUE)), 
+               color = "green", linetype = "dashed", linewidth = 1) +
+    #Ligne bleu indique la médiane
+    geom_vline(aes(xintercept = median({{x_var}}, na.rm = TRUE)), 
+               color = "blue", linetype = "dashed", linewidth = 1) +
+    scale_x_log10(labels = scales::comma) +
+    labs(
+      title = title,
+      x = x_title,
+      y = "Densité"
+    ) +
+    theme_grey()
+}
+```
+
+
+```{r}
+# visualisation du Budget de production du film (USD)
+Make_density(TopMovies, 
+             production_budget_usd,
+             "Histogramme et courbe de densité du Budget de production du film (USD)", 
+             "Budget de production du film (USD)")
+```
+
+
+```{r}
+# visualisation du worldwide_box_office_usd
+Make_density(TopMovies, 
+             worldwide_box_office_usd,
+             "Histogramme et courbe de densité du box-office mondial" ,
+             "box-office mondial (USD)")
+```
+
+
+```{r}
+# visualisation du opening_weekend_usd
+Make_density(TopMovies, 
+             opening_weekend_usd,
+             "Histogramme et courbe de densité du opening_weekend_usd" ,
+             "opening weekend box-office (USD)")
+
+```
+
+**Interprétation** :Les histogrammes des variables financières après transformation logarithmique montrent des distributions nettement moins asymétriques que dans les données brutes. Les valeurs sont davantage concentrées autour des moyennes et des médianes. Cependant, les recettes du week-end d’ouverture semblent montrer une distribution plus hétérogène, avec la présence de plusieurs groupes de films correspondant potentiellement à différents niveaux de lancement commercial.
+
+On étudie un peu sur le nombre de classes (bins) pour le box-office mondial en utilisant la règle de Sturges.
+
+```{r}
+#Nombre d'observation pour le box-office mondial
+n_obs <- TopMovies %>% 
+  filter(!is.na(worldwide_box_office_usd)) %>% 
+  nrow()
+#Calcul de nombre déterminé par la règle de Sturges
+K_sturges <- ceiling(1 + (10/3) * log10(n_obs))
+K_sturges
+```
+
+### Histogramme du box-office mondial avec le nombre de classes déterminé par la règle de Sturgesra et bin=30.
+
+```{r}
+Make_histogram <- function(data, x_var, title, x_title, bins) {
+  data <- data %>%
+    filter(!is.na({{x_var}}))
+  ggplot(data = data, aes(x = {{x_var}})) +
+    geom_histogram(bins = bins, 
+                   fill = "#E63946", 
+                   color = "black") +
+    scale_x_log10(labels = scales::comma) +
+    labs(
+      title = title,
+      x = x_title,
+      y = "Nombre de films"
+    ) +
+    theme_grey()
+}
+```
+
+
+```{r}
+# Comparaison des histogrammes pour le box-office mondial avec la règle de Sturges et bin=30
+grid.arrange(Make_histogram(TopMovies, 
+                            worldwide_box_office_usd,
+                            "Histogramme du box-office mondial avec la règle de Sturges" ,
+                            "box-office mondial (USD)", 
+                            K_sturges),
+             Make_histogram(TopMovies, 
+                            worldwide_box_office_usd,
+                            "Histogramme du box-office mondial avec bin=30" ,
+                            "box-office mondial (USD)", 30), 
+             ncol = 1)
+```
+**La règle de Sturges donne une première indication, mais elle est peu adaptée ici en raison de la forte asymétrie et de la taille importante de l’échantillon.**
+
+### Fonction de répartition empirique des variables quantitatives
+
+Visualisation de la fonction de répartition empirique des trois variable  avec la fonction stat_ecdf 
+
+```{r}
+#Toujour une fonction pour éviter la répétition du code 
+Make_ecdf <- function(data, x_var, title, x_title) {
+  data <- data %>%
+    filter(!is.na({{x_var}}))
+  ggplot(data = data, aes(x = {{x_var}})) +
+    stat_ecdf(geom = "step", 
+              color = "#E63946", 
+              linewidth = 1) +
+    scale_x_log10(labels = scales::comma) +
+    labs(
+      title = title,
+      x = x_title,
+      y = "F(x)"
+    ) +
+    theme_grey()
+}
+```
+
+
+```{r}
+# Visulisation de la fonction de répartition empirique du Budget de production (USD)
+Make_ecdf(TopMovies, 
+          production_budget_usd, 
+          "Fonction de répartition empirique du Budget de production du film (USD)", 
+          "Budget de production du film (USD)")
+```
+
+
+```{r}
+#Visualisation de la fonction de répartition empirique du box-office mondial
+Make_ecdf(TopMovies, 
+          worldwide_box_office_usd, 
+          "Fonction de répartition empirique du box-office mondial", 
+          "Box-office mondial (USD)")
+```
+
+
+```{r}
+#Visualisation de la fonction de répartition empirique du opening_weekend_usd
+Make_ecdf(TopMovies,
+          opening_weekend_usd, 
+          "Fonction de répartition empirique du opening_weekend_usd", 
+          "opening_weekend_usd (USD)")
+```
+**Interprétation**:Les fonctions de répartition empiriques confirment encore une fois les observations précédentes : la majorité des films se concentre sur des niveaux de budget et de recettes relativement modérés, tandis qu’une minorité atteint des montants très élevés. Cette représentation permet surtout de visualiser la part cumulée des films situés sous certains seuils économiques.
+
+
+## Variable qualitatives
+
+L’étude des variables qualitatives complète compréhension de l’organisation du marché : domination de certaines langues, poids des États-Unis dans la production mondiale, importance de certains genres ou types de production, ainsi que les stratégies culturelles et commerciales privilégiées par l’industrie cinématographique.
+
+### Table statistique
+
+Table statistique pour les variables qualitatives `languages`, `creative_type`,`production_countries`.
+
+L'application de fonction st() sur langue et pays donne une table trop longe car il y en a trop de catégories,mais vue que les dix plus importent langue/ pays contribuent à une grande partie des recettes mondiales, on va filtrer les dix premières catégories pour une meilleure lisibilité du tableau et du graphique.
+
+```{r}
+#Table statistique des langues utilisées dans les films
+TopMovies_lang %>%
+  mutate(languages = as.factor(languages)) %>%
+  select(languages) %>%
+  st(out = 'kable')
+
+TopMovies_lang %>%
+  count(languages) %>%
+  mutate(percent = round(n / sum(n)*100,2)) %>%
+  arrange(desc(n)) %>% 
+  slice(1:10) %>%
+  kable(
+    caption = "Table statistique des langues"
+  )
+  
+```
+
+
+```{r}
+#Table statistique des pays de production des films
+TopMovies_pays %>%
+  filter(!is.na(production_countries)) %>%
+  count(production_countries) %>%
+  mutate(percent = round(n / sum(n)*100,2)) %>%
+  arrange(desc(n)) %>%
+  slice(1:10) %>%
+  kable(
+    caption = "Table statistique des pays de production"
+  )
+```
+
+
+```{r}
+#Table staatistique pour les type de production du films
+TopMovies %>%
+  filter(!is.na(creative_type)) %>%
+  pull(creative_type) %>%
+  freq(total = TRUE,valid = FALSE)  %>%
+  kable(
+    caption = "Table statistique des types de production du films"
+  )
+```
+
+### Diagramme en bâtons pour les variables qualitatives
+
+Représentation graphique d’une variable qualitative :diagramme en barres.On commence toujours par définir une fonction de visualisation pour éviter la répétition du code et pour une meilleure lisibilité du code.
+
+```{r}
+Make_barplot <- function(data, x_var, title, x_title) {
+  data <- data %>%
+    filter(!is.na({{x_var}}))
+  ggplot(data = data, aes(x = {{x_var}},y = after_stat(prop), group = 1)) +
+    geom_bar(fill = "#E63946", 
+             color = "black") +
+    coord_flip() +#Turner les axes pour une meilleure visualisation
+    labs(
+      title = title,
+      x = x_title,
+      y = "Proportion de films"
+    ) +
+    theme_minimal() +
+#theme(axis.text.x element_text(angle = 45, hjust = 1)) permet de faire retourner les étiquettes de l'axe x à 45 degrés pour une meilleure lisibilité.
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+}
+```
+
+
+```{r}
+# Diagramme en bâtons pour les 10 langues les plus utilisées
+Make_barplot(TopMovies_lang %>% 
+               filter(languages%in% c(
+      "English", "French", "Spanish", "German", "Mandarin",
+      "Russian", "Italian", "Japanese", "Hindi", "Arabic"
+    )), 
+    languages, 
+    "Distribution des langues utilisées dans les films", 
+    "Langue")
+```
+
+```{r}
+# Diagramme en bâtons pour les 10 pays de production les plus représentés
+Make_barplot(TopMovies_pays %>% 
+               filter(production_countries %in% c
+      ("United States", "United Kingdom", "France", "Germany", "India",
+       "Canada", "Japan", "Italy", "Australia", "Spain"
+      )), 
+      production_countries, 
+      "Distribution des pays de production des films", 
+      "Pays de production")
+
+# Diagramme en bâtons pour les type de production
+```
+
+
+```{r}
+Make_barplot(TopMovies %>% 
+         filter(!is.na(creative_type)), 
+         creative_type, 
+         "Distribution des types de production du films", 
+         "type de production")
+
+```
+Les graphiques montrent une forte concentration des films autour de certaines catégories dominantes. Concernant les types de production, les films contemporains représentent la majorité de l’échantillon, tandis que les autres catégories restent beaucoup moins fréquentes.
+
+L’analyse des pays de production révèle une domination très nette des États-Unis, largement devant le Royaume-Uni et les autres pays. Cela confirme le poids central de l’industrie cinématographique américaine dans l’échantillon étudié.
+
+Enfin, la distribution des langues utilisées dans les films montre une prédominance écrasante de l’anglais, les autres langues n’occupant qu’une part marginale. Le français et l’espagnol apparaissent néanmoins comme les langues secondaires les plus représentées.
+
+
+# 2) Analyse des relations entre variables quantitatives
+
+Cette partie cherche à déterminer si certaines variables quantitatives peuvent être utilisées comme indicateurs prédictifs du succès commercial d’un film. Dans une logique d’investissement, il est particulièrement important d’identifier les variables capables d’expliquer ou d’anticiper les recettes mondiales avant la sortie d’un film.
+
+L’objectif est donc d’étudier dans quelle mesure des éléments tels que le budget de production, les performances du week-end d’ouverture ou le niveau d’exposition en salles sont associés aux résultats économiques finaux. Ces relations permettent d’identifier les facteurs les plus fortement liés au succès commercial et d’évaluer leur pouvoir explicatif.
+
+On va commencer par faire la regression linéaire pour les trois relations suivantes et ensuite on va étudier les résidu des modèles
+Toujours une fonction pour éviter la répétition du code et pour une meilleure lisibilité du code.Ici on la note Make_regression pour faire la regression linéaire et visualiser les résultats.
+
+```{r}
+Make_regression <- function(data, x_var, y_var, title, x_title, y_title) {
+  data_clean <- data %>%
+    filter(!is.na({{x_var}}), !is.na({{y_var}}))
+
+  ggplot(data = data_clean, aes(x = {{x_var}}, y = {{y_var}})) +
+    #Afficher les axes sous forme de nombres réels plutôt qu'en notation scientifique
+    scale_x_continuous(labels = scales::comma) +
+    scale_y_continuous(labels = scales::comma) +
+    geom_point(size = 1) +
+    #Afficher la ligne de regression
+    geom_smooth(method = "lm", 
+                se = FALSE, 
+                color = "blue") +
+    labs(
+      title = title,
+      subtitle = "Régression linéaire",
+      x = x_title,
+      y = y_title
+    ) +
+    theme_grey()
+}
+```
+
+### Ligne de régression linéaire et le nuage de points
+
+```{r message = FALSE}
+# Relation entre Budget et Worldwide Box Office 
+mod1 <- lm(worldwide_box_office_usd ~ production_budget_usd, data = TopMovies)
+summary(mod1)
+Make_regression(TopMovies, 
+                production_budget_usd, 
+                worldwide_box_office_usd, 
+                "Worldwide Box Office en fonction du Budget", 
+                "Budget (USD)", 
+                "Worldwide Box Office (USD)")
+```
+
+**Interprétation** :La régression linéaire met en évidence une relation positive et significative entre le budget de production et les recettes mondiales des films (p-value < 2.2e-16). Le coefficient associé au budget est estimé à 3.12, ce qui suggère qu’une augmentation d’un dollar du budget est associée en moyenne à une augmentation d’environ 3.12 dollars des recettes mondiales.Le coefficient de détermination (R² = 0,53) indique qu’environ 53 % de la variabilité des recettes mondiales est expliquée par le budget de production.Toutefois, la dispersion importante des points autour de la droite de régression montre que d’autres facteurs influencent également le succès commercial des films.
+
+```{r message = FALSE}
+# Relation entre Opening Weekend et Worldwide Box Office
+mod2 <- lm(worldwide_box_office_usd ~ opening_weekend_usd, data = TopMovies)
+summary(mod2)
+Make_regression(TopMovies, 
+                opening_weekend_usd, 
+                worldwide_box_office_usd, 
+                "Worldwide Box Office en fonction de Opening Weekend", 
+                "Opening Weekend (USD)", 
+                "Worldwide Box Office (USD)")
+```
+
+**Interprétation** : La régression linéaire montre une relation positive et fortement significative entre les recettes du week-end d’ouverture et les recettes mondiales des films (p-value < 2.2e-16).
+Le coefficient estimé à 7.47 indique qu’une augmentation d’un dollar des recettes du week-end d’ouverture est associée en moyenne à une augmentation d’environ 7.47 dollars des recettes mondiales.
+Le coefficient de détermination (R² = 0.745) montre qu’environ 74.5 % de la variabilité des recettes mondiales est expliquée par les recettes du week-end d’ouverture, ce qui suggère une relation particulièrement forte entre ces deux variables.
+
+
+Dans une perspective plus réaliste,on voudrait modéliser le niveau d'exposition pour une film.et étudier comment l'exposition influence les recettes mondiales. c'est une bonne idée de utiliser la formule « theater_ratio * avg_run_weeks » pour évaluer l'exposition.
+```{r message = FALSE}
+mod3 <- lm(worldwide_box_office_usd ~ theater_ratio * avg_run_weeks, 
+           data = TopMovies)
+summary(mod3)
+Make_regression(TopMovies, 
+                theater_ratio * avg_run_weeks, 
+                worldwide_box_office_usd, 
+                "Worldwide Box Office en fonction de l'exposition", 
+                "Le niveau d'exposition (theater_ratio * avg_run_weeks)", 
+                "Worldwide Box Office (USD)")
+```
+**Interprétation**: Seulement l'interaction entre la durée et le niveau de diffusion est fortement significative.Cela suggère que l'impact sur le box-office dépend de la combinaison des deux variables : un film bénéficie réellement d'une forte boxoffice uniquement lorsqu'il est à la fois largement diffusé et maintenu longtemps en salle.Cependant, cette relation souffre d'un problème d'endogénéité : ce ne sont pas les séances supplémentaires qui génèrent le succès, mais plutôt les films bien accueillis par le public qui restent naturellement plus longtemps à l'affiche et bénéficient d'une diffusion plus large. La causalité est donc inversée, ce qui rend l'interprétation du coefficient difficile.Ce modèle est utilisé uniquement pour illustrer une tendance générale entre les variables. Comme il ne constitue pas l’analyse principale du projet, on ne réalise pas ici une étude complète des résidus.
+
+**D'un point de vue global, ces trois régressions peuvent-elles nous aider à percer le secret d'un succès au box-office ? La réponse reste nuancée. Bien que chaque dollar investi dans la production rapporte environ trois dollars au box-office, le coefficient R-carré multiple de 0,53 nous indique que ces trois dollars ne sont pas garantis. Les recettes de la semaine de sortie correspondent bien aux recettes totales, mais dans la pratique, il est difficile pour les producteurs et les investisseurs d'agir après le film est déjà sorti. En effet, le coefficient mod3 nous indique qu'il n'est pas très utile d'exiger sans cesse des cinémas qu'ils augmentent le nombre de séances. Le secret d'un succès au box-office reste donc complexe, et personne ne peut garantir avant la sortie qu'un film va forcément remporter un grand succès.**
+
+### Études des résidu des modèles de régression linéaire
+
+1. L'inéarité : graphique diagnostique  résidus versus valeurs ajustées
+Lorsque le lien entre Y et X est linéaire : les résidus devraient être répartis aléatoirement autour de 0, sans structure particulière. La courbe rouge (lissage LOESS) devrait être approximativement horizontale.
+2. Normalité des résidus :QQplot
+Le QQ plot sert à vérifier si les résidus standardisés suivent approximativement une loi normale.Dans une situation idéale, les points devraient suivre la droite bleue.
+3. Homoscédasticité : graphique position-échelle (scale-location)
+Le graphique position-échelle permet de vérifier l'homoscédasticité des résidus. Les points devraient être répartis de manière aléatoire autour d'une ligne horizontale, sans tendance particulière. La courbe rouge (lissage LOESS) devrait être approximativement horizontale.
+
+```{r}
+visualisation_résidus <- function(model) {
+  res_df <- data.frame(
+    fitted = model$fitted.values,
+    résidu = model$residuals
+  )
+  
+#Graphique des résidus en fonction des valeurs ajustées
+  p1 <- ggplot(res_df, aes(x = fitted, y = résidu)) +
+    geom_point() +
+    geom_smooth(method = "loess", 
+                se = FALSE, 
+                color = "red") +
+    scale_x_continuous(labels = comma)+
+    scale_y_continuous(labels = comma)+
+    xlab("Valeurs ajustées") +
+    ylab("Résidus du modèle") +
+    ggtitle("Résidus en fonction des valeurs ajustées")
+  
+#QQ plot des résidus standardisés
+  p2 <- ggplot()+
+    geom_qq(aes(sample = rstandard(model)), 
+            color = "#E63946") +
+    geom_qq_line(aes(sample = rstandard(model)), 
+                 color = "blue") +
+    ggtitle("QQ plot des résidus standardisés")
+  
+#Graphique position-échelle (scale-location)
+  p3 <- ggplot(res_df, aes(x = fitted, 
+                           y = sqrt(abs(rstandard(model))))) +
+    geom_point() +
+    geom_smooth(method = "loess", 
+                se = FALSE, 
+                color = "red") +
+    scale_x_continuous(labels = comma)+
+    scale_y_continuous(labels = comma)+
+    xlab("Valeurs ajustées") +
+    ylab("Résidus standardisés (sqrt)") +
+    ggtitle("Graphe position-échelle (scale-location)")
+  print(p1)
+  print(p2)
+  print(p3)
+}
+```
+
+
+```{r}
+#Étude des résidus du modèle worldwide_box_office_usd ~ production_budget_usd
+visualisation_résidus(mod1)
+```
+
+**Interprétation sur les graphe de diagnostique** : Les graphiques diagnostiques montrent que plusieurs hypothèses du modèle de régression linéaire ne sont pas totalement respectées. Le graphique des résidus en fonction des valeurs ajustées suggère une possible non-linéarité ainsi qu’une augmentation de la dispersion des résidus. Le QQ plot indique que les résidus ne suivent pas une loi normale, notamment en raison de la présence de valeurs extrêmes et d’une asymétrie à droite. Enfin, le graphique Scale-Location met en évidence une hétéroscédasticité, puisque la variance des résidus augmente avec les valeurs ajustées. Ces résultats suggèrent que le modèle linéaire pourrait être amélioré.
+
+
+```{r}
+#Étude des résidus du modèle worldwide_box_office_usd ~ opening_weekend_usd
+visualisation_résidus(mod2)
+```
+**Interprétation sur les graphe de diagnostique** : Le second modèle présente une amélioration.Concernant l'inéarité :Le graphique des résidus en fonction des valeurs ajustées montre une relation linéaire assez évidente, malgré la présence de quelques valeurs extrêmes. Et le QQ plot est plus proche de la droite théorique. Cependant, des écarts importants subsistent dans la queue droite, indiquant encore la présence de valeurs extrêmes. Enfin, le graphique Scale-Location suggère une légère hétéroscédasticité, car la variance des résidus varie avec les valeurs ajustées. Globalement, le modèle semble acceptable, mais certaines hypothèses restent imparfaitement vérifiées.
+
+**Les diagnostics du modèle montrent que certaines hypothèses ne sont pas parfaitement vérifiées, notamment en raison de la présence de valeurs extrêmes et d’une légère hétéroscédasticité. Toutefois, les tendances observées restent globalement cohérentes et le modèle conserve un intérêt descriptif important pour l’étude des relations entre les variables du box-office.**
+
+
+### Détection des observations influentes
+
+1 Distance de Cook : mesure de l'influence d'une observation sur les coefficients du modèle. Une valeur de distance de Cook supérieure à 1 est généralement considérée comme indicative d'une observation influente.
+2 Leverage : mesure de l'influence d'une observation sur les valeurs ajustées du modèle. 
+
+```{r}
+diagnostic_influence <- function(model) {
+#Graphique de la distance de Cook
+  p1 <- ggplot()+
+    aes(x = seq_along(cooks.distance(model)), 
+        y = cooks.distance(model)) +
+    geom_point(color = "#E63946") +
+    xlab("Numéro de l'observation") +
+    ylab("Distance de Cook") +
+    ggtitle("Distance de Cook pour chaque observation") 
+  
+#Graphique des résidus standardisés en fonction du leverage
+  p2 <- ggplot()+
+    aes(x = seq_along(hatvalues(model)), y = rstandard(model)) +
+    geom_point(aes(size=cooks.distance(model)),alpha=0.4) +
+    xlab("Leverage") +
+    ylab("Résidus standarisés") +
+  ggtitle("Leverage vs Résidus standardisés") 
+  print(p1)
+  print(p2)
+}
+```
+
+```{r}
+#Détection des observations influentes pour le modèle worldwide_box_office_usd ~ production_budget_usd
+diagnostic_influence(mod1)
+```
+**Interprétation** :Les distances de Cook montrent que la majorité des observations ont une influence très faible sur le modèle. Toutefois, quelques observations présentent des distances de Cook plus élevées, atteignant environ 0,6, ce qui indique la présence de points influents.Dans le graphe residuals versus leverage, il n'y a pas beaucoup de points présentant à la fois un effet de levier élevé et une valeur résiduelle élevée ; le modèle ne comporte donc pas d'observations particulièrement influentes.
+
+
+```{r}
+#Détection des observations influentes pour le modèle worldwide_box_office_usd ~ opening_weekend_usd
+diagnostic_influence(mod2)
+```
+**Interprétation** :Les diagnostics d’influence montrent une amélioration du second modèle par rapport au précédent. Les distances de Cook sont globalement plus faibles, et aucune observation ne présente une influence excessive sur l’estimation du modèle. Le graphique « Leverage vs Résidus standardisés » confirme également que les points influents sont moins marqués que dans le premier modèle. Ainsi, le second modèle apparaît plus stable et plus robuste face aux observations extrêmes.
+
+# 3) Analyse des relations entre variables qualitatives
+
+Les performances économiques des films ne dépendent pas uniquement de variables financières. Les caractéristiques structurelles des productions, telles que le genre, le type de production ou le pays d’origine, peuvent également influencer fortement les stratégies de marché et les résultats commerciaux.
+
+L’objectif de cette analyse est donc d’identifier certaines spécialisations ou préférences de production selon les pays et les catégories de films en utilisant les tableaux de contingence et les tests du chi-deux, afin de mieux comprendre comment l’industrie cinématographique s’organise autour de différents modèles culturels et économiques.
+
+On va créer une fonction pour analyser les associations entre deux variables qualitatives.
+
+```{r}
+association <- function(data, var1, var2, title_table) {
+  #Création de la table de contingence
+  table_de_contingence <- table( var1,var2)
+  table_de_contingence %>% 
+    as_tibble() %>%
+    pivot_wider(names_from = var2,
+                values_from = n) %>% 
+    kable(format = "markdown", caption = title_table) %>% 
+    print()
+  #Calcul des distributions conditionnelles
+  conditional1 <-table_de_contingence
+  conditional2 <-table_de_contingence
+  
+  for (j in 1:ncol(table_de_contingence)) {
+    conditional1[, j] <- round(table_de_contingence[, j] / sum(table_de_contingence[, j]),digits = 2)
+  }
+  for (i in 1:nrow(table_de_contingence)) {
+    conditional2[i, ] <- round(table_de_contingence[i, ] / sum(table_de_contingence[i, ]),digits = 2)
+  }
+  conditional1 %>% 
+    as_tibble() %>% 
+    pivot_wider(names_from = var2,
+                values_from = n) %>% 
+    kable(format = "markdown")%>% 
+    print()
+  conditional2 %>% 
+    as_tibble() %>% 
+    pivot_wider(names_from = var1,
+                values_from = n) %>% 
+    kable(format = "markdown")%>% 
+    print()
+  #Test du chi-deux d'indépendance
+  chi_squared_test <- chisq.test(table_de_contingence)
+  print(chi_squared_test)
+
+}
+```
+
+Table de contingence (avec probabilité contitionelle) et test chi-deux entre creative_type et production_countries en filtrant les 5 pays de production les plus représentés et en excluant les films avec 'Multiple Creative Types' pour une meilleure lisibilité du tableau et du graphique."
+
+```{r warning=FALSE}
+TopMovies_pays_selectioné <- TopMovies_pays %>%
+  filter(production_countries %in% c
+      ("United States", "United Kingdom", "France", "Germany",
+        "Australia"
+      ),creative_type != "Multi")
+
+association(TopMovies_pays_selectioné,
+            TopMovies_pays_selectioné$creative_type, 
+            TopMovies_pays_selectioné$production_countries, 
+            "Tableau de contingence entre Creative Type et 10 Pays de production")
+```
+
+**Interprétation** :Le test du chi-deux montre qu’il existe une association significative entre le creative type et le pays de production (p-value < 2.2e-16). Les distributions conditionnelles révèlent que les États-Unis dominent largement tous les types créatifs, avec des proportions particulièrement élevées pour les films Hero, Kids et Sci-Fi.La fiction contemporaine est le type créatif le plus populaire dans le monde entier.
+
+### Représentation graphique de lien entre variables qualitatives avec Mosaicplot
+
+```{r}
+#Création d'une table poiur la visualisation du lien entre creative_type et production_countries avec Mosaicplot
+tab_mosaic <- table(TopMovies_pays_selectioné$production_countries,
+                    TopMovies_pays_selectioné$creative_type)
+mosaicplot(
+  tab_mosaic,
+  main = "Mosaic plot entre Creative Type et Pays",
+  xlab = "Pays de production",
+  ylab = "Creative type",
+  col = hcl.colors(nrow(tab_mosaic), "Set2"),
+  las = 2,
+  cex.axis = 0.4
+)
+```
+Table de contingence (avec probabilité contitionelle)et test chi-deux entre genre et creative_type en excluant les films avec 'Multiple Creative Types' .
+
+```{r warning=FALSE}
+TopMovies_genre_selectione <- TopMovies %>% 
+  filter(creative_type != "Multi")
+
+association(TopMovies_genre_selectione,
+            TopMovies_genre_selectione$genre , 
+            TopMovies_genre_selectione$creative_type, 
+            "Tableau de contingence entre Genre et Creative Type")
+```
+
+**Interprétation**: les variable genre et creative_type sont également associées de manière significative (p-value < 2.2e-16). Les distributions conditionnelles montrent que les films Hero sont majoritairement des films d’action, tandis que les films Kids sont principalement des comédies et des films d’animation. Les films Sci-Fi sont souvent classés dans les genres Action et Science-Fiction, tandis que la Fiction Contemporaine est plus diversifiée, avec une forte présence dans les genres Drame et Comédie.
+
+### Représentation graphique de lien entre variables qualitatives avec Mosaic plot
+
+```{r}
+tab_mosaic2 <- table(TopMovies_genre_selectione$genre, 
+                     TopMovies_genre_selectione$creative_type)
+mosaicplot(
+  tab_mosaic2,
+  main = "Mosaic plot entre Genre et Creative Type",
+  xlab = "Genre",
+  ylab = "Creative Type",
+  col = hcl.colors(nrow(tab_mosaic2), "Set2"),
+  las = 2,
+  cex.axis = 0.4
+)
+```
+
+# 4) Analyse entre les variables qualitatives et quantitatives
+
+Cette étape vise à mesurer l’influence simultanée de plusieurs caractéristiques qualitatives sur les performances économiques des films. Dans une perspective industrielle, cela permet notamment d’identifier quels profils de productions semblent statistiquement associés à des niveaux de rentabilité plus élevés.
+
+L’objectif est ainsi de dépasser l’analyse individuelle des variables afin d’obtenir une vision plus globale des facteurs susceptibles d’influencer le succès commercial d’un film.
+
+
+###Visualisation des boxoffice après correction de l'infation en fonction des décennies.
+
+```{r}
+TopMovies_decade <- TopMovies %>%
+  mutate(release_date = as.Date(as.character(release_date))) %>%
+  filter(!is.na(release_date) & !is.na(infl_adj_dom_bo_usd)) %>%
+  mutate(decade = floor(year(release_date) / 10) * 10
+         ) %>%
+#Il existe très peu d'obervation valide avant 1970 et il y a des 
+#observations de films qui a pas encore sortis ( une date après même 2030) 
+#donc on va les exclus
+  
+  filter(decade >= 1970 & decade <= 2020)
+ggplot(data = TopMovies_decade, aes(x = factor(decade), 
+                                    y = infl_adj_dom_bo_usd)) +
+  geom_boxplot() +
+  stat_summary(fun = mean, 
+               geom = "point", 
+               shape = 18, 
+               size =3, 
+               color = "red") +
+  scale_y_log10(labels = scales::comma) +
+  labs(title = "Boxplot du box-office domestique ajusté par décennie",
+    x = "Décennie",
+    y = "Box-office domestique ajusté (USD)"
+  ) +
+  theme_grey()
+```
+
+**Les années 1970 présentent les niveaux médians les plus élevés, tandis qu’une baisse progressive est observable entre les années 1980 et 2010. Cette diminution suggère que les revenus domestiques ajustés des films ont eu tendance à devenir plus faibles au cours de cette période.On observe également qu’à partir des années 2000, la dispersion devient plus importante et le nombre de valeurs atypiques augmente fortement, ce qui traduit une plus grande hétérogénéité des performances au box-office au fil du temps.**
+
+## Rapport de corrélation et étude de l’effet des décennies sur les recettes domestiques
+
+```{r}
+eta2(TopMovies_decade$infl_adj_dom_bo_usd,as.factor(TopMovies_decade$decade))
+summary(lm(infl_adj_dom_bo_usd ~ factor(decade), data = TopMovies_decade))
+```
+
+**Interprétation** :L’analyse de variance montre que la décennie a un effet statistiquement significatif sur le box-office domestique ajusté (p-value < 2.2e-16). Les coefficients estimés indiquent que les recettes moyennes des décennies après sont inférieures à celles des années 1970. Toutefois, la taille d’effet reste faible (la taille d'effet η² ≈ 0,04), ce qui signifie que la décennie n’explique qu’une faible part de la variabilité totale du box-office. Ainsi, malgré une différence statistiquement significative entre les décennies, l’influence pratique de cette variable reste limitée.
+
+## Visualisation du box-office mondial en fonction du creative_type du film
+```{r}
+TopMovies_creative <- TopMovies %>%
+  filter(!is.na(creative_type), 
+         !is.na(worldwide_box_office_usd), 
+         creative_type != "Multi")
+
+ggplot(TopMovies_creative, aes(x = creative_type, 
+                               y = worldwide_box_office_usd)) +
+  geom_boxplot() +
+  stat_summary(fun = mean, 
+               geom = "point", 
+               shape = 18, 
+               size = 3, 
+               color = "red") +
+  scale_y_log10(labels = scales::comma) +
+  labs(
+    title = "Boxplot du box-office mondial en fonction du Creative Type",
+    x = "Creative Type",
+    y = "Box-office mondial (USD)"
+  ) +
+  theme_grey()
+```
+
+### Rapport de corrélation et étude de l’effet des types de création sur les recettes 
+
+```{r}
+eta2(TopMovies_creative$worldwide_box_office_usd,
+     as.factor(TopMovies_creative$creative_type))
+summary(lm(worldwide_box_office_usd ~ factor(creative_type), 
+           data = TopMovies_creative))
+```
+
+**Interprétation** :L’analyse de variance montre que le creative type exerce une influence significative sur le box-office mondial (p-value < 2.2e-16). Le boxplot met en évidence des différences importantes entre les catégories : les films de type Hero, Kids, Sci-Fi et Fantasy présentent des niveaux de box-office nettement plus élevés que les autres catégories, tandis que les films Factual obtiennent des revenus plus faibles. Les coefficients estimés confirment ces écarts, notamment pour les films Hero, dont le box-office moyen dépasse largement celui de la catégorie de référence (Contemp). En revanche, les catégories Drama et Hist ne présentent pas de différence statistiquement significative par rapport à la catégorie de référence. Enfin, la taille d'effet (η² ≈ 0,16) indique que le creative type explique une part modérée mais importante de la variabilité du box-office mondial.
+
+# 5) Analyse des composantes principales (ACP)
+
+Le marché cinématographique repose sur un grand nombre de variables économiques souvent fortement corrélées entre elles. L’Analyse en Composantes Principales (ACP) permet de synthétiser cette information complexe en réduisant la dimension des données tout en conservant les structures principales du marché.L’ACP offre ainsi une vision plus synthétique et stratégique des différents modèles économiques présents dans l’industrie cinématographique.
+
+Préparation des données pour l'ACP : sélection des variables quantitatives
+Certaines variables quantitatives n’ont pas été retenues dans l’ACP car elles étaient soit fortement corrélées à d’autres variables déjà sélectionnées, soit moins pertinentes pour l’étude de la performance commerciale des films.Par example la variable "domestic share percentage" est une combinaison de deux variable déjà prise donc pas besoin de resélectionner,et la variable "opening_theaters" est une variable quantitative discrète.
+
+```{r}
+pca_data <- TopMovies %>%
+  select(
+    movie_name,
+    production_budget_usd,
+    worldwide_box_office_usd,
+    opening_weekend_usd,
+    legs,
+    opening_theaters,
+    avg_run_weeks
+  ) %>%
+  drop_na()
+
+#Réalisation de l'ACP
+res_pca <- prcomp(pca_data[,-1],scale. = TRUE,center = TRUE)
+summary(res_pca)
+```
+
+```{r}
+#visualisation de la variance expliquée par les composantes principales
+var_exp <- tidy(res_pca, matrix = "pcs")
+
+var_exp %>%
+  kable(digits = 4,
+        col.names = c("PC", "Ecart-type", "% variance", "% cumule"),
+        caption = "Variance expliquée par composante ")
+```
+
+### Visualisation de la contribution des variables aux composantes principalesavec screeplot
+
+```{r}
+ggplot(var_exp, aes(x = PC)) +
+  #Afficher les barres pour la variance expliquée individuelle
+  geom_col(aes(y = percent),
+           fill = "#457B9D", 
+           alpha = 0.85, 
+           colour = "black") +
+  #Ajouter la courbe pour la variance expliquée cumulée
+  geom_line(aes(y = cumulative), 
+            colour = "#E63946", 
+            linewidth = 1.2) +
+  geom_point(aes(y = cumulative), 
+             colour = "#E63946",
+             size = 3) +
+  geom_hline(yintercept = 0.7, 
+             linetype = "dashed", 
+             colour = "grey50") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  scale_x_continuous(breaks = 1:length(res_pca$sdev)) +
+  labs(
+    title = "Screeplot – ACP des variables du dataset TopMovies",
+    subtitle = "Barres : variance expliquée individuelle | Courbe rouge : variance cumulée",
+    x = "Composante principale",
+    y = "Part de variance expliquée"
+  ) +
+  theme_minimal()
+
+```
+Les résultats de l’ACP montrent que les deux premières composantes principales expliquent environ 71.6 % de la variance totale du jeu de données, ce qui indique qu’une grande partie de l’information initiale peut être résumée dans un espace bidimensionnel.
+
+La première composante principale (PC1) explique à elle seule plus de 51 % de la variance et représente principalement la dimension liée à l'ampleur commerciale des films. Les films se positionnant fortement sur cet axe correspondent aux grandes productions  à stratégie de lancement massif.
+La deuxième composante (PC2), qui explique environ 20 % de la variance, apporte une information complémentaire liée davantage au succès à long terme des films. Elle mesure la capacité d'un film à maintenir son attractivité auprès du public sur la durée. Un score élevé sur PC2 caractérise ainsi les films dont le succès est progressif et durable, indépendamment de l'ampleur de leur lancement initial.
+
+Le screeplot justifie l'utilisation des deux premiers axes pour la visualisation et l'interprétation des données, ceux-ci captant ensemble 71,6 % de l'information totale.
+
+
+### Visualisation du cercle des corrélations pour les deux premières composantes principales (PC1 et PC2) de l'ACP
+
+```{r}
+# Extraction des coordonnées des variables dans le plan PC1-PC2
+loadings <- as.data.frame(res_pca$rotation[, 1:2]) %>%
+  rownames_to_column(var = "variable")
+
+ggplot(loadings, aes(x = PC1, y = PC2)) +
+  #Ajouter les flèches pour les variables
+  geom_segment(aes(x = 0, 
+                   y = 0, 
+                   xend = PC1, 
+                   yend = PC2), 
+               arrow = arrow(length = unit(0.2, "cm")), 
+               color = "#E63946", 
+               linewidth = 1) +
+  #Ajouter les étiquettes des variables
+  geom_text(aes(label = variable), 
+            hjust = 1.2, 
+            vjust= 1.2, 
+            color = "#457B9D") +
+  #Ajouter un cercle de rayon 1 pour représenter les corrélations
+    annotate("path",
+           x = cos(seq(0, 2 * pi, length.out = 300)),
+           y = sin(seq(0, 2 * pi, length.out = 300)),
+           colour = "grey60", linetype = "dashed") +
+  coord_equal(clip = "off")+
+  geom_hline(yintercept = 0, color = "grey50") +
+  geom_vline(xintercept = 0, color = "grey50") +
+  xlim(-1.3, 1.3) + ylim(-1.3, 1.3) +
+  labs(
+    title = "Cercle des corrélations – ACP",
+    x = paste0("PC1 (", round(var_exp$percent[1] *100, 1), "%)"),
+    y = paste0("PC2 (", round(var_exp$percent[2] *100, 1), "%)"),
+    caption = "Données : Topmovies"
+  ) +
+  theme_minimal()
+```
+
+Le cercle des corrélations met en évidence deux logiques différentes du succès commercial des films. D’un côté, le budget de production, les recettes du week-end d’ouverture et le box-office mondial sont fortement liés, ce qui reflète le modèle des grands films modernes : une stratégie reposant sur de gros investissements marketing et une sortie massive permettant de générer rapidement des revenus importants.
+À l’inverse, les variables legs et avg_run_weeks décrivent davantage la capacité d’un film à rester durablement attractif auprès du public. Leur position distincte dans l’ACP suggère qu’un succès immédiat au lancement ne garantit pas nécessairement une longue exploitation en salles(le vecteur legs et le vectuer openning weekend sont presque orthogonale).
+
+On remarque également que la variable worldwide_box_office_usd se situe entre ces deux groupes de variables dans le cercle des corrélations. Cela suggère que le succès d’un film au nieaux financier peut provenir soit d’un lancement très puissant, soit d’une performance plus progressive et durable dans le temps, correspondant à deux stratégies commerciales différentes de l’industrie cinématographique.
+
+### Graphe des individues dans le plan de PC1 et PC2
+
+```{r}
+## Projection des individus dans le plan ACP
+loadings <- augment(res_pca, data = pca_data)
+ggplot(loadings, aes(x = .fittedPC1 , 
+                     y = .fittedPC2, 
+                     colour = worldwide_box_office_usd)) +
+  geom_point (alpha = 0.6, size = 2) +
+  scale_colour_viridis_c() +
+  coord_fixed() + #Assure que les unités sur les axes sont égales
+  geom_hline(yintercept = 0, 
+             linetype = "dashed", 
+             colour = "grey70") +
+  geom_vline(xintercept = 0, 
+             linetype = "dashed", 
+             colour = "grey70") +
+  labs(
+    title = "Projection des films dans le plan (PC1, PC2)",
+    subtitle = "Couleur : performance au box-office (legs)",
+    x = paste0("PC1 (", round(var_exp$percent[1] * 100, 1), "%)"),
+    y = paste0("PC2 (", round(var_exp$percent[2] * 100, 1), "%)"),
+    colour = "worldwide box office"
+  ) +
+  theme_minimal()
+```
+
+La projection des films dans le plan principal de l’ACP met en évidence plusieurs profils de succès commerciaux. Les films situés à gauche du graphique correspondent généralement à des productions à très gros budget ayant réalisé d’importantes recettes mondiales, tandis que les films situés plus haut sur l’axe vertical se distinguent davantage par leur longévité en salles et leurs bons “legs”.
+Ce graphe a montrer que la plupart des films dans la base de données sont banal qui ne sont ni des grand films ni des films à succès progressif.Ce qui est surprenant, c'est que les films qui ont les plus grand succès financière n'est pas capables de maintenir leur attractivité dans le temps.Pour finir, même si cela peut sembler un peu cliché, il y a toujours des films qui sont très bien accueillis par la critique mais qui ne font pas un grand succès au box-office.
+
+# 6) Classification
+
+Enfin, les méthodes de classification permettent d’identifier différents profils de films partageant des caractéristiques économiques similaires. Dans une logique de marché, cette étape revient à segmenter l’industrie cinématographique en plusieurs groupes homogènes selon leurs performances financières, leurs budgets ou leur niveau d’exposition.
+
+Cette segmentation peut être particulièrement utile pour comprendre quels types de productions présentent des comportements économiques comparables et pour identifier certains profils de films à fort potentiel commercial ou, au contraire, plus risqués financièrement.
+
+## k-means
+
+Clustering avec K-means pour identifier des groupes de films similaires en fonction de leurs caractéristiques quantitatives (budget, box-office, etc.) et visualiser les clusters dans le plan des deux premières composantes principales (PC1 et PC2) de l'ACP.
+
+
+On commence par selectioner le nombre de classe en déterminant perte de l'inertie intra-classes pour trouver le nombre optimal de clusters
+
+```{r}
+# On utilise les même données preparé initialement pour l'ACP
+# Normalisation des données pour kmeans
+pca_data_scaled <- scale(pca_data[,-1])
+K <- 10
+wss <- c(1:K)
+## Calcul de l'inertie intra-classes pour k de 1 à 10
+for (k in 1:K) {
+  km_result <- kmeans(pca_data_scaled, 
+                      centers = k, 
+                      nstart = 25)
+  wss[k] <- km_result$tot.withinss
+}
+elbow_data <- tibble(k = 1:K, wss = wss)
+# Diagramme de perte de l'inertie intra-classes
+ggplot(elbow_data, aes(x = k, y = wss)) +
+  geom_bar(stat = "identity", 
+           fill = "steelblue", 
+           alpha = 0.7) +
+  geom_line(group = 1, 
+            color = "red", 
+            linewidth = 1) +
+  geom_point(size = 3, 
+             color = "red") +
+  labs(
+    title = "Diagramme de perte de l'inertie intra-classes",
+    subtitle = "Le coude indique le nombre optimal de clusters",
+    x = "Nombre de classes (k)",
+    y = "Inertie totale intra-classes (WSS)"
+  ) +
+  theme_minimal()
+```
+
+
+```{r}
+#On peut aussi utiliser la fonction fviz_nbclust pour trouver le nombre optimal de classe
+fviz_nbclust(pca_data_scaled, 
+             function(x, k) kmeans(x, centers = k, nstart = 25,iter.max = 100),
+             method = "wss")
+```
+
+Le diagramme du coude met en évidence une forte diminution de l’inertie jusqu’à k=3, puis une diminution plus progressive. Afin d’obtenir des groupes plus détaillés tout en conservant une bonne interprétabilité, le choix k=5 a été retenu pour l’analyse finale.
+
+On applique K-means avec le nombre de clusters optimal (k = 5) et on visualise les clusters dans le plan des deux premières composantes principales (PC1, PC2) de l'ACP 
+
+```{r}
+# Extraction des coordonnées des individus dans le plan ACP
+scores <- as.data.frame(res_pca$x)
+# Fixation de la graine aléatoire pour la reproductibilité
+set.seed(123)
+
+kmeans_result <- kmeans(pca_data_scaled, 
+                        centers = 5, 
+                        nstart = 25)
+# Création d'une table cotient toutes les coordonées ded PC et numéro de cluster
+scores_clu <- scores %>%
+  mutate(cluster = factor(kmeans_result$cluster))
+
+ggplot(scores_clu, aes(x = PC1, 
+                       y = PC2, 
+                       color = cluster)) +
+  geom_point(alpha = 0.6, 
+             size = 2) +
+  scale_color_brewer(palette = "Set1") +
+  coord_fixed() +
+  geom_hline(yintercept = 0, 
+             linetype = "dashed", 
+             colour = "grey70") +
+  geom_vline(xintercept = 0, 
+             linetype = "dashed", 
+             colour = "grey70") +
+  labs(
+    title = "Clustering K-means des films dans le plan (PC1, PC2)",
+    subtitle = "Couleur : cluster K-means (k=5)",
+    x = paste0("PC1 (", round(var_exp$percent[1] * 100, 1), "%)"),
+    y = paste0("PC2 (", round(var_exp$percent[2] * 100, 1), "%)"),
+    color = "Cluster K-means"
+  ) +
+  theme_minimal()
+```
+Le clustering met en évidence plusieurs profils de films aux caractéristiques commerciales différentes.
+Le cluster 1 regroupe principalement des films à très fortes recettes mondiales et à gros budgets, correspondant aux grands blockbusters internationaux.
+Les clusters 2 et 4 rassemblent davantage des films aux performances plus moyennes, avec des recettes et des budgets plus modérés.
+Le cluster 3 semble correspondre à des films ayant de bons “legs” et une exploitation plus durable en salles, traduisant un succès plus progressif auprès du public.
+Enfin, le cluster 5 contient un nombre très limité de films atypiques présentant des caractéristiques extrêmes, probablement des succès exceptionnels se distinguant fortement du reste du dataset.
+
+## Clustering hiérarchique
+
+La classification hiérarchique ascendante n’a pas été retenue comme méthode principale car le nombre très important d’observations rendait le dendrogramme difficilement interprétable. Une méthode K-means a donc été privilégiée pour obtenir des groupes plus lisibles et adaptés à la taille de bases des donées.Cependant,on fait quand même une arbre hiérarchique sur une échantillon d'observation sélectioné aléatoirement dans Topmovies pour montrer un peu la structure.
+
+On choisit 50 observations aléatoires pour l'arbre hiérarchique en utilisant les coordonnées des 5 CP dans ACP pour une meilleure visualisation
+
+```{r}
+# Extraction des 5 premières composantes pour le clustering hiérarchique
+arbre_data <- as.data.frame(res_pca$x[, 1:5])
+set.seed(123)
+# Tirage aléatoire de 50 films
+tirage <- sample(1:nrow(arbre_data), 50)
+
+arbre_sample <- arbre_data[tirage, ]
+
+film_labels <- TopMovies$movie_name[tirage]
+
+# calcul de la matrice de distance eucidienne
+dist_matrix <- dist(arbre_sample)
+# application de l'algorithme de clustering hiérarchique avec la méthode de Ward
+hclust_result <- hclust(dist_matrix, method = "ward.D2")
+# visualisation du dendrogramme
+plot(hclust_result,
+     labels = film_labels,
+     main = "Dendrogramme du clustering hiérarchique",
+     xlab = "Films (50 échantillons aléatoires)",
+     ylab = "Distance",
+     sub = "",
+     cex = 0.5,
+     las = 2)
+
+```
+
+# Conclusion
+
+L’ensemble des analyses réalisées met en évidence une caractéristique centrale du marché du cinéma : il s’agit d’un marché extrêmement concentré et fortement asymétrique. Une minorité de films génère une part très importante des recettes mondiales, tandis qu’une grande partie des productions obtient des performances beaucoup plus modestes. Cette structure explique pourquoi l’investissement dans le cinéma reste une activité particulièrement risquée malgré l’existence de tendances générales observables.
+
+Les analyses quantitatives ont montré que certains indicateurs constituent néanmoins de bons signaux prédictifs du succès commercial. Les recettes du week-end d’ouverture apparaissent comme l’un des facteurs les plus fortement associés aux recettes mondiales finales, ce qui souligne l’importance du marketing, de l’attente du public et de la stratégie de lancement. Le budget de production possède également un rôle significatif : les films disposant de moyens financiers importants bénéficient généralement d’une meilleure exposition et d’une plus grande capacité à atteindre le marché international. Cependant, les analyses montrent aussi qu’un budget élevé ne garantit pas automatiquement la rentabilité, plusieurs productions très coûteuses figurant parmi les plus grands échecs économiques du jeu de données.
+
+Les analyses qualitatives permettent d’aller plus loin en mettant en évidence certaines logiques structurelles de l’industrie cinématographique. Le marché mondial reste largement dominé par les productions américaines et anglophones, capables de toucher un public international beaucoup plus vaste. Certains genres, notamment les films de super-héros, de science-fiction, d’aventure ou destinés au jeune public, semblent également bénéficier d’un potentiel commercial plus important que d’autres catégories plus spécialisées.
+
+Dans une perspective concrète d’investissement ou de production, plusieurs enseignements peuvent être tirés de cette étude. Pour un producteur ou un investisseur européen — par exemple français — souhaitant maximiser les probabilités de succès commercial international, les résultats suggèrent qu’il serait stratégiquement avantageux :
+*de privilégier des productions capables de s’exporter facilement à l’international* ;
+*d’accorder une attention particulière au lancement commercial et à la stratégie de diffusion* ;
+*de limiter les budgets excessivement élevés lorsque le potentiel de marché reste incertain* ;
+*et de favoriser certains genres historiquement associés aux meilleures performances mondiales*.
+
+Les analyses montrent également qu’il existe plusieurs modèles économiques viables dans l’industrie du cinéma. Certains films reposent sur des investissements massifs et une très forte exposition médiatique, tandis que d’autres productions plus modestes peuvent atteindre une rentabilité exceptionnelle grâce à un faible coût initial et à un fort bouche-à-oreille. Les “sleeper hits” étudiés dans ce projet illustrent notamment l’importance de la réception du public après la sortie du film.
+
+Enfin, les méthodes multivariées (ACP et classifications) ont permis de montrer que le marché cinématographique est composé de plusieurs profils économiques distincts et qu’il n’existe pas une unique stratégie de réussite. Cette diversité confirme que le succès commercial d’un film dépend d’une combinaison complexe de facteurs financiers, culturels et médiatiques.Ainsi, même si les performances d’un film restent en partie imprévisibles, l’analyse statistique permet néanmoins d’identifier certaines tendances structurelles du marché et d’aider à réduire l’incertitude associée aux décisions de production et d’investissement dans l’industrie cinématographique.
+
